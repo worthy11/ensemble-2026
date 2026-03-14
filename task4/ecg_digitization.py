@@ -185,17 +185,17 @@ def digitize_mask(mask: np.ndarray, num_samples: int) -> dict[str, np.ndarray]:
 
     signals: dict[str, np.ndarray] = {}
 
-    for column_index, lead_names in enumerate(GRID_LEAD_LAYOUT):
-        x0, x1 = layout.column_bounds[column_index]
-        width_margin = max(4, (x1 - x0) // 12)
-        x0 = min(x1, x0 + width_margin)
-        x1 = max(x0 + 1, x1 - width_margin)
+    for row_index, lead_names in enumerate(GRID_LEAD_LAYOUT):
+        y0, y1 = layout.row_bounds[row_index]
+        height_margin = max(4, (y1 - y0) // 12)
+        y0 = min(y1, y0 + height_margin)
+        y1 = max(y0 + 1, y1 - height_margin)
 
-        for row_index, lead_name in enumerate(lead_names):
-            y0, y1 = layout.row_bounds[row_index]
-            height_margin = max(4, (y1 - y0) // 12)
-            y0 = min(y1, y0 + height_margin)
-            y1 = max(y0 + 1, y1 - height_margin)
+        for column_index, lead_name in enumerate(lead_names):
+            x0, x1 = layout.column_bounds[column_index]
+            width_margin = max(4, (x1 - x0) // 12)
+            x0 = min(x1, x0 + width_margin)
+            x1 = max(x0 + 1, x1 - width_margin)
 
             region = cleaned[y0:y1, x0:x1]
             signals[canonical_lead_name(lead_name)] = extract_signal_from_region(
