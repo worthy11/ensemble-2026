@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 from tqdm import tqdm
 
-from ecg_common import list_images
+from ecg_common import canonical_lead_name, list_images
 
 
 @dataclass
@@ -69,6 +69,26 @@ def generate_masks(source_dir: Path, output_dir: Path, thickness: int, limit: in
         generated += 1
 
     return generated
+
+
+def load_wfdb_signals(hea_path: Path) -> dict[str, np.ndarray]:
+    """Load ground-truth ECG signals from a WFDB .hea/.dat file pair.
+
+    Returns a dict mapping canonical lead name → 1-D float32 array in millivolts.
+    Uses the official ``wfdb`` library which automatically applies gain/baseline.
+    """
+    try:
+        import wfdb  # lazy import — only needed when GT signals are available
+    except ImportError as exc:
+        raise ImportError("Install the 'wfdb' package:  pip install wfdb") from exc
+
+    record_stem = str(hea_path.with_suffix(""))
+    signals, fields = wfdb.rdsamp(record_stem)
+    # signals: (n_samples, n_leads) float64, already in physical units (mV)
+    out: dict[str, np.ndarray] = {}
+    for i, name in enumerate(fields["sig_name"]):
+        out[canonical_lead_name(name)] = signals[:, i].astype(np.float32)
+    return out
 
 
 def prepare_dataset(

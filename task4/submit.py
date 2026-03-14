@@ -12,7 +12,6 @@ ENDPOINT = "task4"
 API_TOKEN = os.getenv("TEAM_TOKEN")
 SERVER_URL = os.getenv("SERVER_URL")
 
-
 # Use SCRATCH/tasks_data/task4 as data root if SCRATCH is set (for cluster)
 SCRATCH = os.environ.get("SCRATCH")
 if SCRATCH:
@@ -20,29 +19,50 @@ if SCRATCH:
 else:
     DATA_ROOT = Path(__file__).resolve().parent
 
-TEST_DIR = DATA_ROOT / "test"
-MASK_OUTPUT_DIR = DATA_ROOT / "data" / "test_masks_classical"
-NPZ_FILE = DATA_ROOT / "data" / "out" / "submission.npz"
-NUM_SAMPLES = 1250
+# Ensure task4/ is on sys.path regardless of launch directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+TEST_DIR         = DATA_ROOT / "test"
+MASK_OUTPUT_DIR  = DATA_ROOT / "data" / "test_masks"
+NPZ_FILE         = DATA_ROOT / "data" / "out" / "submission.npz"
+CHECKPOINT       = DATA_ROOT / "artifacts" / "unet_resnet34.pt"
+NUM_SAMPLES      = 1250
 
 
-def run_pipeline() -> None:
-
-    # Ensure task4/ is in sys.path for import regardless of launch dir
-    script_dir = Path(__file__).resolve().parent
-    sys.path.insert(0, str(script_dir))
+def run_classical_pipeline_cmd() -> None:
+    """Run the classical (non-ML) CV pipeline."""
     from ecg_classical import run_classical_pipeline  # noqa: PLC0415
 
     pipeline_args = argparse.Namespace(
         input_dir=TEST_DIR,
         output=NPZ_FILE,
         num_samples=NUM_SAMPLES,
-        mask_output_dir=MASK_OUTPUT_DIR,
-        test_limit=None,  
+        mask_output_dir=MASK_OUTPUT_DIR / "classical",
+        test_limit=None,
     )
-    MASK_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    (MASK_OUTPUT_DIR / "classical").mkdir(parents=True, exist_ok=True)
     NPZ_FILE.parent.mkdir(parents=True, exist_ok=True)
     run_classical_pipeline(pipeline_args)
+
+
+def run_unet_pipeline_cmd(checkpoint: Path, image_size: int, threshold: float) -> None:
+    """Run inference with a trained UNet checkpoint and save submission.npz."""
+    from ecg_digitization import run_pipeline  # noqa: PLC0415
+
+    unet_mask_dir = MASK_OUTPUT_DIR / "unet"
+    unet_mask_dir.mkdir(parents=True, exist_ok=True)
+    NPZ_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    pipeline_args = argparse.Namespace(
+        checkpoint=checkpoint,
+        input_dir=TEST_DIR,
+        output=NPZ_FILE,
+        num_samples=NUM_SAMPLES,
+        image_size=image_size,
+        threshold=threshold,
+        mask_output_dir=unet_mask_dir,
+    )
+    run_pipeline(pipeline_args)
 
 
 def submit() -> None:
@@ -69,12 +89,55 @@ def submit() -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run ECG pipeline and submit results.")
-    parser.add_argument("--skip-pipeline", action="store_true", help="Skip pipeline; submit existing NPZ directly")
+    parser = argparse.ArgumentParser(
+        description="Run ECG digitisation pipeline and submit results.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["classical", "unet"],
+        default="classical",
+        help="Pipeline to use: 'classical' (no ML) or 'unet' (trained model).",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=CHECKPOINT,
+        help="Path to trained UNet checkpoint (.pt file). Used only with --mode unet.",
+    )
+    parser.add_argument(
+        "--image-size",
+        type=int,
+        default=None,
+        help="Image size for UNet inference (uses checkpoint default if not set).",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Mask binarisation threshold (uses checkpoint default if not set).",
+    )
+    parser.add_argument(
+        "--skip-pipeline",
+        action="store_true",
+        help="Skip pipeline execution; submit the existing NPZ directly.",
+    )
     args = parser.parse_args()
 
     if not args.skip_pipeline:
-        run_pipeline()
+        if args.mode == "unet":
+            if not args.checkpoint.exists():
+                raise FileNotFoundError(
+                    f"UNet checkpoint not found: {args.checkpoint}\n"
+                    "Train the model first with run_pipeline.py, or pass --checkpoint <path>."
+                )
+            run_unet_pipeline_cmd(
+                checkpoint=args.checkpoint,
+                image_size=args.image_size or 512,
+                threshold=args.threshold or 0.5,
+            )
+        else:
+            run_classical_pipeline_cmd()
 
     submit()
 

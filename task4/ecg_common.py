@@ -9,15 +9,32 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
 STANDARD_LEADS = ["I", "II", "III", "AVR", "AVL", "AVF", "V1", "V2", "V3", "V4", "V5", "V6"]
 
-GRID_LEAD_LAYOUT = [
-    ["I", "aVR", "V1", "V4"],
-    ["II", "aVL", "V2", "V5"],
+# Standard 12-lead ECG grid layout: 3 rows × 4 columns.
+# Each column represents a consecutive 2.5-second time window:
+#   col 0 → samples   0–1249
+#   col 1 → samples 1250–2499
+#   col 2 → samples 2500–3749
+#   col 3 → samples 3750–4999
+GRID_LEAD_LAYOUT: list[list[str]] = [
+    ["I",   "aVR", "V1", "V4"],
+    ["II",  "aVL", "V2", "V5"],
     ["III", "aVF", "V3", "V6"],
 ]
 
+# Sample offset for each column in the 4-column ECG layout.
+COLUMN_SAMPLE_OFFSETS = [0, 1250, 2500, 3750]
+
+# Number of samples shown per lead panel (2.5 s × 500 Hz).
+LEAD_PANEL_SAMPLES = 1250
+
+# Physical ECG constants (standard calibration).
+ECG_PAPER_SPEED_MM_PER_S = 25.0   # mm per second
+ECG_GAIN_MM_PER_MV = 10.0          # mm per millivolt (standard gain)
+ECG_SAMPLING_RATE_HZ = 500         # samples per second
+
 LEAD_NAME_MAP = {
-    "I": "I",
-    "II": "II",
+    "I":   "I",
+    "II":  "II",
     "III": "III",
     "AVR": "AVR",
     "AVL": "AVL",
@@ -40,6 +57,12 @@ def list_images(directory: Path) -> list[Path]:
 
 
 def normalize_signal(signal: np.ndarray) -> np.ndarray:
+    """Normalize signal to zero-median, 95th-percentile scale.
+
+    NOTE: This removes physical amplitude information (mV units).
+    Prefer the mV-calibrated extraction path; this function is kept
+    as an optional utility for shape-only comparison.
+    """
     signal = np.asarray(signal, dtype=np.float32)
     signal = signal - float(np.median(signal))
     scale = float(np.percentile(np.abs(signal), 95))

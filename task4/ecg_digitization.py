@@ -8,7 +8,16 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from ecg_common import GRID_LEAD_LAYOUT, STANDARD_LEADS, canonical_lead_name, normalize_signal, record_name_from_path
+from ecg_common import (
+    COLUMN_SAMPLE_OFFSETS,
+    ECG_GAIN_MM_PER_MV,
+    ECG_PAPER_SPEED_MM_PER_S,
+    GRID_LEAD_LAYOUT,
+    LEAD_PANEL_SAMPLES,
+    STANDARD_LEADS,
+    canonical_lead_name,
+    record_name_from_path,
+)
 from ecg_segmentation import load_checkpoint, load_rgb_image, predict_mask_array
 
 
@@ -17,6 +26,33 @@ class Layout:
     column_bounds: list[tuple[int, int]]
     row_bounds: list[tuple[int, int]]
 
+
+# ---------------------------------------------------------------------------
+# Amplitude calibration
+# ---------------------------------------------------------------------------
+
+def estimate_pixels_per_mv(mask_width: int) -> float:
+    """Estimate the pixel-to-millivolt scale from the image (mask) width.
+
+    Standard ECG layout:
+      - Paper speed = 25 mm/s  →  2.5 s × 25 mm/s = 62.5 mm per column
+      - 4 columns               →  250 mm total useful width
+      - Gain = 10 mm/mV         →  pixels_per_mv = (mask_width / 250) × 10
+
+    This is a good first-order approximation for standard A4 / Letter scans.
+    For highly degraded or non-standard images the estimate may be off, but
+    it will at least preserve relative amplitude proportions.
+    """
+    seconds_per_column = LEAD_PANEL_SAMPLES / 500  # 2.5 s
+    mm_per_column = ECG_PAPER_SPEED_MM_PER_S * seconds_per_column  # 62.5 mm
+    total_mm = mm_per_column * len(GRID_LEAD_LAYOUT[0])            # 250 mm (4 cols)
+    pixels_per_mm = mask_width / total_mm
+    return pixels_per_mm * ECG_GAIN_MM_PER_MV  # px/mV
+
+
+# ---------------------------------------------------------------------------
+# Mask cleaning & layout detection
+# ---------------------------------------------------------------------------
 
 def clean_mask(mask: np.ndarray, min_component_area: int = 64) -> np.ndarray:
     binary = (mask > 127).astype(np.uint8)
@@ -64,34 +100,50 @@ def estimate_layout(mask: np.ndarray) -> Layout:
     binary = (mask > 127).astype(np.uint8)
     x_projection = binary.sum(axis=0)
     y_projection = binary.sum(axis=1)
-    column_centers = _projection_centers(x_projection, groups=4)
-    row_centers = _projection_centers(y_projection, groups=4)
+    n_cols = len(GRID_LEAD_LAYOUT[0])   # 4
+    n_rows = len(GRID_LEAD_LAYOUT)      # 3
+    column_centers = _projection_centers(x_projection, groups=n_cols)
+    row_centers = _projection_centers(y_projection, groups=n_rows)
     return Layout(
         column_bounds=_bounds_from_centers(column_centers, mask.shape[1]),
         row_bounds=_bounds_from_centers(row_centers, mask.shape[0]),
     )
 
 
-def extract_signal_from_region(region_mask: np.ndarray, target_length: int) -> np.ndarray:
+# ---------------------------------------------------------------------------
+# Signal extraction with mV calibration
+# ---------------------------------------------------------------------------
+
+def extract_signal_from_region(
+    region_mask: np.ndarray,
+    target_length: int,
+    pixels_per_mv: float,
+) -> np.ndarray:
+    """Extract a 1-D ECG signal from a binary mask region.
+
+    Args:
+        region_mask:  Mask for a single lead panel (uint8, 0/255).
+        target_length: Number of output samples.
+        pixels_per_mv: Calibration — how many pixel rows equal 1 mV.
+
+    Returns:
+        float32 array of length `target_length`, values in millivolts.
+        Zero corresponds to the vertical centre of the region (baseline).
+    """
     binary = (region_mask > 127).astype(np.uint8)
     height, width = binary.shape
+
     if binary.sum() == 0:
         return np.zeros(target_length, dtype=np.float32)
 
-    time_axis_is_vertical = height >= width
-    if time_axis_is_vertical:
-        trace = np.full(height, np.nan, dtype=np.float32)
-        for y in range(height):
-            xs = np.flatnonzero(binary[y])
-            if xs.size:
-                trace[y] = float(np.median(xs))
-    else:
-        trace = np.full(width, np.nan, dtype=np.float32)
-        for x in range(width):
-            ys = np.flatnonzero(binary[:, x])
-            if ys.size:
-                trace[x] = float(np.median(ys))
+    # For each x column, take the median y of lit pixels.
+    trace = np.full(width, np.nan, dtype=np.float32)
+    for x in range(width):
+        ys = np.flatnonzero(binary[:, x])
+        if ys.size:
+            trace[x] = float(np.median(ys))
 
+    # Interpolate over gaps.
     valid = np.flatnonzero(np.isfinite(trace))
     if valid.size == 0:
         return np.zeros(target_length, dtype=np.float32)
@@ -101,17 +153,36 @@ def extract_signal_from_region(region_mask: np.ndarray, target_length: int) -> n
         missing = np.flatnonzero(~np.isfinite(trace))
         trace[missing] = np.interp(missing, valid, trace[valid])
 
+    # Light smoothing.
     trace = moving_average(trace, max(5, trace.size // 100))
-    signal = -(trace - float(np.median(trace)))
-    source_x = np.linspace(0.0, 1.0, num=signal.size, dtype=np.float32)
-    target_x = np.linspace(0.0, 1.0, num=target_length, dtype=np.float32)
-    resampled = np.interp(target_x, source_x, signal).astype(np.float32)
-    return normalize_signal(resampled)
 
+    # Convert pixel y → millivolts.
+    # The vertical centre of the region is treated as the 0 mV baseline.
+    # The y-axis is inverted (increasing y = downward in image = negative amplitude).
+    baseline_px = height / 2.0
+    signal_mv = -(trace - baseline_px) / pixels_per_mv
+
+    # Resample to target_length via linear interpolation.
+    src_x = np.linspace(0.0, 1.0, num=signal_mv.size, dtype=np.float32)
+    tgt_x = np.linspace(0.0, 1.0, num=target_length, dtype=np.float32)
+    return np.interp(tgt_x, src_x, signal_mv).astype(np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Top-level digitisation functions
+# ---------------------------------------------------------------------------
 
 def digitize_mask(mask: np.ndarray, num_samples: int) -> dict[str, np.ndarray]:
+    """Convert a predicted segmentation mask to a dict of lead → signal (mV).
+
+    Each lead panel is assumed to show `num_samples` samples (e.g. 1250 at 500 Hz).
+    The amplitude is calibrated using the image width and standard ECG constants
+    (25 mm/s paper speed, 10 mm/mV gain).
+    """
     cleaned = clean_mask(mask)
     layout = estimate_layout(cleaned)
+    pixels_per_mv = estimate_pixels_per_mv(mask.shape[1])
+
     signals: dict[str, np.ndarray] = {}
 
     for column_index, lead_names in enumerate(GRID_LEAD_LAYOUT):
@@ -125,8 +196,13 @@ def digitize_mask(mask: np.ndarray, num_samples: int) -> dict[str, np.ndarray]:
             height_margin = max(4, (y1 - y0) // 12)
             y0 = min(y1, y0 + height_margin)
             y1 = max(y0 + 1, y1 - height_margin)
+
             region = cleaned[y0:y1, x0:x1]
-            signals[canonical_lead_name(lead_name)] = extract_signal_from_region(region, target_length=num_samples)
+            signals[canonical_lead_name(lead_name)] = extract_signal_from_region(
+                region,
+                target_length=num_samples,
+                pixels_per_mv=pixels_per_mv,
+            )
 
     for lead_name in STANDARD_LEADS:
         signals.setdefault(lead_name, np.zeros(num_samples, dtype=np.float32))
@@ -152,12 +228,17 @@ def save_submission(records: dict[str, dict[str, np.ndarray]], output_path: Path
 
 def digitize_masks(args) -> None:
     records: dict[str, dict[str, np.ndarray]] = {}
-    mask_paths = sorted(path for path in args.mask_dir.iterdir() if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"})
+    mask_paths = sorted(
+        path for path in args.mask_dir.iterdir()
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+    )
     if not mask_paths:
         raise FileNotFoundError(f"No mask images found in {args.mask_dir}")
 
     for mask_path in tqdm(mask_paths, desc="digitize-masks"):
-        records[record_name_from_path(mask_path)] = digitize_mask_file(mask_path, num_samples=args.num_samples)
+        records[record_name_from_path(mask_path)] = digitize_mask_file(
+            mask_path, num_samples=args.num_samples
+        )
 
     save_submission(records, args.output)
     print(f"saved digitized signals to {args.output}")
@@ -173,7 +254,10 @@ def run_pipeline(args) -> None:
     if args.mask_output_dir is not None:
         args.mask_output_dir.mkdir(parents=True, exist_ok=True)
 
-    image_paths = sorted(path for path in args.input_dir.iterdir() if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"})
+    image_paths = sorted(
+        path for path in args.input_dir.iterdir()
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+    )
     if not image_paths:
         raise FileNotFoundError(f"No images found in {args.input_dir}")
 

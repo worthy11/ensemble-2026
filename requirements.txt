@@ -6,3 +6,4 @@ albumentations
 opencv-python
 numpy
 tqdm
+wfdb
