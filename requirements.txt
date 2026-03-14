@@ -1,0 +1,8 @@
+torch
+torchvision
+pytorch-lightning
+segmentation-models-pytorch
+albumentations
+opencv-python
+numpy
+tqdm
