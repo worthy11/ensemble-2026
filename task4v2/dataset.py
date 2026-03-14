@@ -14,8 +14,9 @@ class ECGDataset(Dataset):
         image_dir: Ścieżka do folderu ze zdjęciami testowymi.
         """
         self.image_dir = image_dir
-        # Pobieranie listy tylko plików będących standardowymi formatami obrazu
-        self.image_files = [f for f in os.listdir(image_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+        # Pobieranie listy tylko plików będących standardowymi formatami obrazu i niebędących ukrytymi
+        self.image_files = [f for f in os.listdir(image_dir) 
+                            if f.lower().endswith(('.png', '.jpg', '.jpeg')) and not f.startswith('._')]
 
     def __len__(self):
         return len(self.image_files)
