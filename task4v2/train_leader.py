@@ -90,6 +90,12 @@ def render_target_mask_from_json(target_pts_dict, w, h):
         # Konwersja na format OpenCV int32
         pts = np.array(points, dtype=np.int32)
         
+        # Ochrona przed plaską listą lub dziwnymi wymiarami zwracanymi z JSON
+        if pts.ndim == 1:
+            pts = pts.reshape(-1, 2)
+        
+        pts = pts.reshape((-1, 1, 2))
+        
         # Rysowanie grubych krzywych na czarnym tle by U-Net latwiej to złapał (grubosć = 3 px)
         cv2.polylines(mask, [pts], isClosed=False, color=255, thickness=3)
         
