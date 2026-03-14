@@ -12,7 +12,7 @@ from ecg_segmentation import train_model
 def parse_args() -> argparse.Namespace:
     scratch = os.environ.get("SCRATCH")
     if scratch:
-        default_data_root = Path(scratch) / "tasks_data" / "task4" / "ensemble_task_4_data"
+        default_data_root = Path(scratch) / "tasks_data" / "task4"
     else:
         default_data_root = Path(".")
 
