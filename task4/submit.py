@@ -27,7 +27,10 @@ NUM_SAMPLES = 1250
 
 
 def run_pipeline() -> None:
-    sys.path.insert(0, str(REPO_ROOT / "task4"))
+
+    # Ensure task4/ is in sys.path for import regardless of launch dir
+    script_dir = Path(__file__).resolve().parent
+    sys.path.insert(0, str(script_dir))
     from ecg_classical import run_classical_pipeline  # noqa: PLC0415
 
     pipeline_args = argparse.Namespace(
