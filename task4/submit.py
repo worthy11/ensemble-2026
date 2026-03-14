@@ -12,11 +12,18 @@ ENDPOINT = "task4"
 API_TOKEN = os.getenv("TEAM_TOKEN")
 SERVER_URL = os.getenv("SERVER_URL")
 
-REPO_ROOT = Path(__file__).resolve().parent
-TEST_DIR = REPO_ROOT / "test"
-MASK_OUTPUT_DIR = REPO_ROOT / "data" / "test_masks_classical"
-NPZ_FILE = REPO_ROOT / "data" / "out" / "submission.npz"
-NUM_SAMPLES = 1250 
+
+# Use SCRATCH/tasks_data/task4 as data root if SCRATCH is set (for cluster)
+SCRATCH = os.environ.get("SCRATCH")
+if SCRATCH:
+    DATA_ROOT = Path(SCRATCH) / "tasks_data" / "task4"
+else:
+    DATA_ROOT = Path(__file__).resolve().parent
+
+TEST_DIR = DATA_ROOT / "test"
+MASK_OUTPUT_DIR = DATA_ROOT / "data" / "test_masks_classical"
+NPZ_FILE = DATA_ROOT / "data" / "out" / "submission.npz"
+NUM_SAMPLES = 1250
 
 
 def run_pipeline() -> None:
