@@ -22,7 +22,6 @@ def parse_args() -> argparse.Namespace:
             "prepare data, train segmentation, and generate final 1D NPZ output."
         )
     )
-
     # Data preparation
     parser.add_argument(
         "--source-dir",
@@ -116,6 +115,7 @@ def run_train_stage(args: argparse.Namespace) -> None:
 
 def run_inference_stage(args: argparse.Namespace) -> None:
     print("[3/3] Running segmentation + 1D digitization...")
+
     pipeline_args = argparse.Namespace(
         checkpoint=args.checkpoint,
         input_dir=args.test_dir,
@@ -125,7 +125,9 @@ def run_inference_stage(args: argparse.Namespace) -> None:
         threshold=args.threshold,
         mask_output_dir=args.pred_mask_dir,
     )
+
     run_pipeline(pipeline_args)
+
     print(f"Predicted masks saved to {args.pred_mask_dir}")
     print(f"Final NPZ submission saved to {args.submission_output}")
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import albumentations as A
@@ -183,6 +184,17 @@ def _read_checkpoint_hparam(checkpoint: dict, key: str, default):
 
 
 def train_model(args) -> None:
+    if torch.cuda.is_available():
+        # Better Tensor Core utilization on modern NVIDIA GPUs.
+        torch.set_float32_matmul_precision("high")
+
+    requested_workers = int(args.num_workers)
+    if requested_workers > 0:
+        num_workers = requested_workers
+    else:
+        cpu_count = os.cpu_count() or 4
+        num_workers = min(16, max(2, cpu_count - 1))
+
     train_dataset = ECGSegmentationDataset(
         image_dir=args.train_images,
         mask_dir=args.train_masks,
@@ -200,15 +212,19 @@ def train_model(args) -> None:
         train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
-        num_workers=args.num_workers,
+        num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=args.num_workers,
+        num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
+        persistent_workers=num_workers > 0,
+        prefetch_factor=2 if num_workers > 0 else None,
     )
 
     lightning_module = ECGSegmentationLightningModule(
@@ -231,6 +247,9 @@ def train_model(args) -> None:
         devices=1,
         callbacks=[checkpoint_callback],
         logger=False,
+        precision="16-mixed" if torch.cuda.is_available() else "32-true",
+        benchmark=torch.cuda.is_available(),
+        log_every_n_steps=25,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
