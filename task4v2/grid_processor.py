@@ -38,7 +38,7 @@ class Gridder:
         Złożone zdjęcia wymagają bardziej zaawansowanych algorytmów np. RAN-SAC lub grafowych minimalnych ścieżek.
         """
         if len(points) == 0:
-            return np.array([[]])
+            return np.zeros((0, 0, 2))
 
         # 1. Sortowanie punktów Y (góra -> dół)
         points = points[np.argsort(points[:, 1])]
@@ -123,14 +123,15 @@ class Undistortion:
         image: oryginalny, zaszumiony / zakrzywiony obraz (np. w BGR z openCV)
         grid_matrix: numPy matryca punktów [Rows, Cols, 2] od Griddera z punktami w osiach (X, Y)
         """
-        if grid_matrix.ndim != 3 or grid_matrix.shape[2] != 2:
-            raise ValueError(f"Nieprawidłowy kształt matrycy (Oczekiwano NxMx2): Otrzymano {grid_matrix.shape}")
+        if grid_matrix.ndim != 3 or grid_matrix.shape[-1] != 2:
+            print(f"[WARN] Undistortion: Otrzymano nieprawidłowy kształt matrycy {grid_matrix.shape}. Zwracam obraz oryginalny.")
+            return image
 
         rows, cols, _ = grid_matrix.shape
         
         if rows < 2 or cols < 2:
             # Nie ma wystarczającej matrycy do sprostowania chociaćby 1 kratki.
-            print("[WARN] Undistortion: Zbyt mała matryca krat by przeprowadzić prostowanie.")
+            print(f"[WARN] Undistortion: Zbyt mała matryca krat ({rows}x{cols}) by przeprowadzić prostowanie. Zwracam oryginał.")
             return image
         
         # Wyjściowa pustą plansza odpowiadająca równej perspektywie
