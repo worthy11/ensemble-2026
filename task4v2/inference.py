@@ -11,6 +11,9 @@ from signal_processor import SignalPostProcessor
 from signal_converter import SignalConverter
 
 # ==============================================================================
+from dotter_model import DotterModel
+from leader_model import LeaderModel
+
 import argparse
 
 # Opcjonalna stała: Ścieżka do wytrenowanych wag (jeśli dostępne)
