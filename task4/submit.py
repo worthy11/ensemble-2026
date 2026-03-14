@@ -6,7 +6,6 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-# Load .env file if present
 load_dotenv()
 
 ENDPOINT = "task4"
@@ -17,7 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 TEST_DIR = REPO_ROOT / "test"
 MASK_OUTPUT_DIR = REPO_ROOT / "data" / "test_masks_classical"
 NPZ_FILE = REPO_ROOT / "data" / "out" / "submission.npz"
-NUM_SAMPLES = 1250  # 2.5 s × 500 Hz
+NUM_SAMPLES = 1250 
 
 
 def run_pipeline() -> None:
@@ -29,7 +28,7 @@ def run_pipeline() -> None:
         output=NPZ_FILE,
         num_samples=NUM_SAMPLES,
         mask_output_dir=MASK_OUTPUT_DIR,
-        test_limit=None,  # process all 500 images
+        test_limit=None,  
     )
     MASK_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     NPZ_FILE.parent.mkdir(parents=True, exist_ok=True)
