@@ -465,13 +465,13 @@ def digitize_mask(mask: np.ndarray, num_samples: int,
         # Minimal padding
         hm = max(1, (y1 - y0) // 20)
         y0_p = max(0, y0 + hm)
-        y1_p = min(mask.shape[0], y1 - hm)
+        y1_p = min(cleaned.shape[0], y1 - hm)
 
         for col_index, lead_name in enumerate(lead_names):
             x0, x1 = layout.column_bounds[col_index]
             wm = max(1, (x1 - x0) // 20)
             x0_p = max(0, x0 + wm)
-            x1_p = min(mask.shape[1], x1 - wm)
+            x1_p = min(cleaned.shape[1], x1 - wm)
 
             region = cleaned[y0_p:y1_p, x0_p:x1_p]
             signals[canonical_lead_name(lead_name)] = extract_signal_from_region(
