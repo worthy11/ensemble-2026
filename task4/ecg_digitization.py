@@ -124,11 +124,9 @@ def estimate_pixels_per_mv(image_width: int, image_height: int,
         # Vertical projection → detect horizontal grid spacing (amplitude axis).
         v_proj = image_gray.mean(axis=1).astype(np.float64)
         spacing = _detect_grid_spacing_fft(v_proj)
-        if spacing is not None and 5 < spacing < image_height / 3:
-            # Standard ECG: 1 small square = 1 mm, 1 mV = 10 mm = 10 squares.
-            pixels_per_mm = 1.0 / spacing  # Wait: spacing IS one grid square.
-            # Actually spacing = pixels per grid square (1mm).
-            pixels_per_mm = spacing  # pixels per 1mm grid square
+        # Typical ECG image is ~1500-2000px high. 1mm grid is ~8-15px.
+        if spacing is not None and 5 < spacing < 30:
+            pixels_per_mm = spacing  # spacing IS one grid square (1mm)
             pixels_per_mv = pixels_per_mm * ECG_GAIN_MM_PER_MV  # × 10
             return pixels_per_mv
 
@@ -316,11 +314,24 @@ def _projection_centers(projection: np.ndarray, groups: int) -> list[int]:
 
 
 def _bounds_from_centers(centers: list[int], limit: int) -> list[tuple[int, int]]:
-    b = [0]
+    # Instead of starting exactly at 0 and ending exactly at limit,
+    # let's be more robust: infer the panel width/height from the centers.
+    if len(centers) < 2:
+        return [(0, limit)]
+    
+    diffs = [centers[i+1] - centers[i] for i in range(len(centers)-1)]
+    avg_size = int(np.median(diffs))
+    
+    bounds = []
+    # Left/Top edge is roughly center - half size
+    start = max(0, centers[0] - avg_size // 2)
+    bounds.append(start)
     for l, r in zip(centers[:-1], centers[1:]):
-        b.append((l + r) // 2)
-    b.append(limit)
-    return [(int(s), int(e)) for s, e in zip(b[:-1], b[1:])]
+        bounds.append((l + r) // 2)
+    # Right/Bottom edge is roughly last center + half size
+    bounds.append(min(limit, centers[-1] + avg_size // 2))
+    
+    return [(int(s), int(e)) for s, e in zip(bounds[:-1], bounds[1:])]
 
 
 def estimate_layout(mask: np.ndarray) -> Layout:
@@ -339,25 +350,7 @@ def estimate_layout(mask: np.ndarray) -> Layout:
 # Signal extraction with Viterbi + baseline detection + mV calibration
 # ---------------------------------------------------------------------------
 
-def _detect_baseline_y(binary_region: np.ndarray) -> float:
-    """Detect the signal baseline as the median y of all signal pixels.
-
-    More accurate than assuming the vertical center of the region.
-    """
-    ys = np.flatnonzero(binary_region.sum(axis=1) > 0)
-    if ys.size == 0:
-        return binary_region.shape[0] / 2.0
-    # The baseline is the most "common" y — use median of per-column medians.
-    h, w = binary_region.shape
-    col_medians: list[float] = []
-    for x in range(w):
-        ys_col = np.flatnonzero(binary_region[:, x])
-        if ys_col.size:
-            col_medians.append(float(np.median(ys_col)))
-    if not col_medians:
-        return h / 2.0
-    return float(np.median(col_medians))
-
+    pass
 
 def _trim_calibration_pulse(trace: np.ndarray, threshold_factor: float = 3.0) -> np.ndarray:
     """Detect and replace the calibration pulse at the start of the trace.
@@ -421,8 +414,9 @@ def extract_signal_from_region(
     # --- Smoothing ---
     trace = moving_average(trace, max(3, trace.size // 200))
 
-    # --- Baseline detection (better than region center) ---
-    baseline_px = _detect_baseline_y(binary)
+    # --- Baseline detection: ISO-electric line is usually the median of the trace itself ---
+    valid_trace = trace[np.isfinite(trace)]
+    baseline_px = float(np.median(valid_trace)) if valid_trace.size > 0 else height / 2.0
 
     # --- Convert pixel y → millivolts (inverted y-axis) ---
     signal_mv = -(trace - baseline_px) / pixels_per_mv
@@ -462,13 +456,14 @@ def digitize_mask(mask: np.ndarray, num_samples: int,
 
     for row_index, lead_names in enumerate(GRID_LEAD_LAYOUT):
         y0, y1 = layout.row_bounds[row_index]
-        hm = max(4, (y1 - y0) // 12)
-        y0, y1 = min(y1, y0 + hm), max(y0 + 1, y1 - hm)
+        # Minimal padding
+        hm = max(1, (y1 - y0) // 20)
+        y0, y1 = max(0, y0 + hm), min(mask.shape[0], y1 - hm)
 
         for col_index, lead_name in enumerate(lead_names):
             x0, x1 = layout.column_bounds[col_index]
-            wm = max(4, (x1 - x0) // 12)
-            x0, x1 = min(x1, x0 + wm), max(x0 + 1, x1 - wm)
+            wm = max(1, (x1 - x0) // 20)
+            x0, x1 = max(0, x0 + wm), min(mask.shape[1], x1 - wm)
 
             region = cleaned[y0:y1, x0:x1]
             signals[canonical_lead_name(lead_name)] = extract_signal_from_region(
