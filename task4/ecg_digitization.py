@@ -314,24 +314,17 @@ def _projection_centers(projection: np.ndarray, groups: int) -> list[int]:
 
 
 def _bounds_from_centers(centers: list[int], limit: int) -> list[tuple[int, int]]:
-    # Instead of starting exactly at 0 and ending exactly at limit,
-    # let's be more robust: infer the panel width/height from the centers.
+    # Split exactly halfway between centers, but force start at 0 and end at limit
+    # This prevents cropping out the top/leftmost or bottom/rightmost signals.
     if len(centers) < 2:
         return [(0, limit)]
     
-    diffs = [centers[i+1] - centers[i] for i in range(len(centers)-1)]
-    avg_size = int(np.median(diffs))
-    
-    bounds = []
-    # Left/Top edge is roughly center - half size
-    start = max(0, centers[0] - avg_size // 2)
-    bounds.append(start)
+    b = [0]
     for l, r in zip(centers[:-1], centers[1:]):
-        bounds.append((l + r) // 2)
-    # Right/Bottom edge is roughly last center + half size
-    bounds.append(min(limit, centers[-1] + avg_size // 2))
+        b.append((l + r) // 2)
+    b.append(limit)
     
-    return [(int(s), int(e)) for s, e in zip(bounds[:-1], bounds[1:])]
+    return [(int(s), int(e)) for s, e in zip(b[:-1], b[1:])]
 
 
 def estimate_layout(mask: np.ndarray) -> Layout:
@@ -418,8 +411,11 @@ def extract_signal_from_region(
     valid_trace = trace[np.isfinite(trace)]
     baseline_px = float(np.median(valid_trace)) if valid_trace.size > 0 else height / 2.0
 
-    # --- Convert pixel y → millivolts (inverted y-axis) ---
-    signal_mv = -(trace - baseline_px) / pixels_per_mv
+    # --- Convert pixel y → millivolts ---
+    # In images, y=0 is top, y=max is bottom.
+    # So if trace > baseline_px, it is physically LOWER on the paper.
+    # Therefore real voltage = baseline_px - trace
+    signal_mv = (baseline_px - trace) / pixels_per_mv
 
     # --- Trim calibration pulse ---
     signal_mv = _trim_calibration_pulse(signal_mv)
