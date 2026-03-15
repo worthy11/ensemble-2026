@@ -35,7 +35,8 @@ def render_trace_mask(metadata: dict, image_shape: tuple[int, int], thickness: i
             continue
 
         points = np.asarray(pixels, dtype=np.float32)
-        # JSON coordinates are [x, y], which perfectly match image [width, height]
+        # Hack to rotate the traces vertically to survive horizontal downscaling during UNet training
+        points = points[:, ::-1].copy()
         points[:, 0] = np.clip(points[:, 0], 0, width - 1)
         points[:, 1] = np.clip(points[:, 1], 0, height - 1)
         points = np.round(points).astype(np.int32)

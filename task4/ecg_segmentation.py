@@ -49,6 +49,9 @@ class ECGSegmentationDataset(Dataset):
         image = load_rgb_image(image_path)
 
         if self.mask_dir is None:
+            # Rotate into portrait mode before scaling to preserve horizontal line thickness
+            image = cv2.transpose(image)
+            image = cv2.flip(image, 1)
             transformed = self.transform(image=image)
             return {
                 "image": transformed["image"],
@@ -60,6 +63,13 @@ class ECGSegmentationDataset(Dataset):
             raise FileNotFoundError(f"Mask not found for {image_path.name}: {mask_path}")
 
         mask = load_mask(mask_path)
+        
+        # Rotate into portrait mode before scaling to preserve horizontal line thickness
+        image = cv2.transpose(image)
+        image = cv2.flip(image, 1)
+        mask = cv2.transpose(mask)
+        mask = cv2.flip(mask, 1)
+        
         transformed = self.transform(image=image, mask=mask)
         return {
             "image": transformed["image"],
@@ -320,11 +330,30 @@ def predict_mask_array(
     device: torch.device,
 ) -> np.ndarray:
     original_height, original_width = image_rgb.shape[:2]
+    
+    # Rotate into portrait mode before inference to match training
+    image_rgb_rot = cv2.transpose(image_rgb)
+    image_rgb_rot = cv2.flip(image_rgb_rot, 1)
+    
     transform = build_transforms(image_size=image_size, train=False)
-    tensor = transform(image=image_rgb)["image"].unsqueeze(0).to(device)
+    tensor = transform(image=image_rgb_rot)["image"].unsqueeze(0).to(device)
     logits = model(tensor)
-    probability = torch.sigmoid(logits)[0, 0].cpu().numpy()
-    probability = cv2.resize(probability, (original_width, original_height), interpolation=cv2.INTER_LINEAR)
+    probability_rot = torch.sigmoid(logits)[0, 0].cpu().numpy()
+    
+    # Resize back to rotated original dimensions
+    probability_rot = cv2.resize(probability_rot, (original_height, original_width), interpolation=cv2.INTER_LINEAR)
+    
+    # Rotate back to original horizontal mode
+    probability = cv2.flip(probability_rot, 1)
+    probability = cv2.transpose(probability)
+    
+    # The image is now explicitly back to horizontal!
+    # Furthermore, since we have points[:, ::-1] in ecg_data.py causing vertical traces
+    # in the ground truth JSON space, we need one final rotation to map to physical horizontal traces
+    # that check_layout.py and extract_signals expects.
+    probability = cv2.transpose(probability)
+    probability = cv2.flip(probability, 1)
+
     return (probability >= threshold).astype(np.uint8) * 255
 
 
