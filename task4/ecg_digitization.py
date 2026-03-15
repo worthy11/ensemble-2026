@@ -303,39 +303,48 @@ def moving_average(values: np.ndarray, window: int) -> np.ndarray:
     return np.convolve(values, k, mode="same")
 
 
-def _projection_centers(projection: np.ndarray, groups: int) -> list[int]:
-    smoothed = moving_average(projection.astype(np.float32), max(9, len(projection) // 80))
-    centers: list[int] = []
-    edges = np.linspace(0, len(smoothed), groups + 1, dtype=int)
-    for s, e in zip(edges[:-1], edges[1:]):
-        seg = smoothed[s:e]
-        centers.append(s + int(np.argmax(seg)) if seg.size else s)
-    return centers
-
-def _bounds_from_centers(centers: list[int], limit: int) -> list[tuple[int, int]]:
-    if len(centers) < 2:
-        return [(0, limit)]
-    b = [0]
-    for l, r in zip(centers[:-1], centers[1:]):
-        b.append((l + r) // 2)
-    b.append(limit)
-    return [(int(s), int(e)) for s, e in zip(b[:-1], b[1:])]
-
 def estimate_layout(mask: np.ndarray) -> Layout:
-    # 12-lead ECGs usually have 4 columns and 4 rows (3 standard rows + 1 rhythm strip at bottom).
-    # We must split the Y-axis into 4 rows to correctly isolate the top 3 rows.
-    binary = (mask > 127).astype(np.uint8)
-    x_proj = binary.sum(axis=0)
-    y_proj = binary.sum(axis=1)
+    # Based on the exact JSON ground truth bounding boxes across 3300x2550 images:
+    # X bounds for the 4 columns:
+    #   Col 0: ~177 - 915
+    #   Col 1: ~915 - 1653
+    #   Col 2: ~1653 - 2391
+    #   Col 3: ~2391 - 3129
+    # Y bounds for the 3 rows (ignoring the 4th rhythm strip at the bottom):
+    #   Row 0: ~937 - 1231
+    #   Row 1: ~1286 - 1636
+    #   Row 2: ~1819 - 2090
     
-    n_cols = len(GRID_LEAD_LAYOUT[0])  # 4
-    n_rows_actual = len(GRID_LEAD_LAYOUT) + 1  # 3 standard rows + 1 rhythm strip = 4 rows
+    # Rather than hardcoding these exact pixels (which change if the image is scaled),
+    # we determine the true signal bounding box from the mask:
+    ys, xs = np.nonzero(mask > 127)
+    if len(ys) == 0:
+        return Layout(
+            column_bounds=[(0, mask.shape[1]//4)] * 4,
+            row_bounds=[(0, mask.shape[0]//3)] * 3
+        )
+        
+    x_min, x_max = int(xs.min()), int(xs.max())
+    y_min, y_max = int(ys.min()), int(ys.max())
     
-    col_bounds = _bounds_from_centers(_projection_centers(x_proj, n_cols), mask.shape[1])
-    row_bounds = _bounds_from_centers(_projection_centers(y_proj, n_rows_actual), mask.shape[0])
+    # The printed grid width is (x_max - x_min). 
+    # There are exactly 4 columns.
+    w = (x_max - x_min) // 4
+    col_bounds = [
+        (x_min, x_min + w),
+        (x_min + w, x_min + 2*w),
+        (x_min + 2*w, x_min + 3*w),
+        (x_min + 3*w, x_max)
+    ]
     
-    # We only care about the first 3 rows for the 12 standard leads.
-    row_bounds = row_bounds[:len(GRID_LEAD_LAYOUT)]
+    # The Y-axis has 4 rows (3 standard + 1 rhythm).
+    h = (y_max - y_min) // 4
+    row_bounds = [
+        (y_min, y_min + h),
+        (y_min + h, y_min + 2*h),
+        (y_min + 2*h, y_min + 3*h)
+        # 4th row (rhythm) is omitted
+    ]
     
     return Layout(column_bounds=col_bounds, row_bounds=row_bounds)
 
@@ -455,14 +464,16 @@ def digitize_mask(mask: np.ndarray, num_samples: int,
         y0, y1 = layout.row_bounds[row_index]
         # Minimal padding
         hm = max(1, (y1 - y0) // 20)
-        y0, y1 = max(0, y0 + hm), min(mask.shape[0], y1 - hm)
+        y0_p = max(0, y0 + hm)
+        y1_p = min(mask.shape[0], y1 - hm)
 
         for col_index, lead_name in enumerate(lead_names):
             x0, x1 = layout.column_bounds[col_index]
             wm = max(1, (x1 - x0) // 20)
-            x0, x1 = max(0, x0 + wm), min(mask.shape[1], x1 - wm)
+            x0_p = max(0, x0 + wm)
+            x1_p = min(mask.shape[1], x1 - wm)
 
-            region = cleaned[y0:y1, x0:x1]
+            region = cleaned[y0_p:y1_p, x0_p:x1_p]
             signals[canonical_lead_name(lead_name)] = extract_signal_from_region(
                 region, target_length=num_samples, pixels_per_mv=pixels_per_mv,
             )
