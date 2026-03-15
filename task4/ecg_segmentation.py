@@ -50,8 +50,7 @@ class ECGSegmentationDataset(Dataset):
 
         if self.mask_dir is None:
             # Rotate into portrait mode before scaling to preserve horizontal line thickness
-            image = cv2.transpose(image)
-            image = cv2.flip(image, 1)
+            image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
             transformed = self.transform(image=image)
             return {
                 "image": transformed["image"],
@@ -65,10 +64,8 @@ class ECGSegmentationDataset(Dataset):
         mask = load_mask(mask_path)
         
         # Rotate into portrait mode before scaling to preserve horizontal line thickness
-        image = cv2.transpose(image)
-        image = cv2.flip(image, 1)
-        mask = cv2.transpose(mask)
-        mask = cv2.flip(mask, 1)
+        image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
+        mask = cv2.rotate(mask, cv2.ROTATE_90_CLOCKWISE)
         
         transformed = self.transform(image=image, mask=mask)
         return {
@@ -332,27 +329,19 @@ def predict_mask_array(
     original_height, original_width = image_rgb.shape[:2]
     
     # Rotate into portrait mode before inference to match training
-    image_rgb_rot = cv2.transpose(image_rgb)
-    image_rgb_rot = cv2.flip(image_rgb_rot, 1)
+    image_rgb_rot = cv2.rotate(image_rgb, cv2.ROTATE_90_CLOCKWISE)
     
     transform = build_transforms(image_size=image_size, train=False)
     tensor = transform(image=image_rgb_rot)["image"].unsqueeze(0).to(device)
     logits = model(tensor)
     probability_rot = torch.sigmoid(logits)[0, 0].cpu().numpy()
     
-    # Resize back to rotated original dimensions
+    # Resize back to rotated original dimensions (which is W=original_height, H=original_width)
     probability_rot = cv2.resize(probability_rot, (original_height, original_width), interpolation=cv2.INTER_LINEAR)
     
-    # Rotate back to original horizontal mode
-    probability = cv2.flip(probability_rot, 1)
-    probability = cv2.transpose(probability)
-    
-    # The image is now explicitly back to horizontal!
-    # Furthermore, since we have points[:, ::-1] in ecg_data.py causing vertical traces
-    # in the ground truth JSON space, we need one final rotation to map to physical horizontal traces
-    # that check_layout.py and extract_signals expects.
-    probability = cv2.transpose(probability)
-    probability = cv2.flip(probability, 1)
+    # Rotate CCW 90 degrees back to original horizontal mode
+    # This precisely undoes the CW 90 degree rotation from training!
+    probability = cv2.rotate(probability_rot, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
     return (probability >= threshold).astype(np.uint8) * 255
 
