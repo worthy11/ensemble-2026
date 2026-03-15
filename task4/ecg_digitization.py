@@ -501,14 +501,16 @@ def digitize_image_adaptive(
         y0, y1 = layout.row_bounds[row_index]
         # Minimal padding
         hm = max(1, (y1 - y0) // 20)
-        y0, y1 = max(0, y0 + hm), min(mask.shape[0], y1 - hm)
+        y0_p = max(0, y0 + hm)
+        y1_p = min(cleaned.shape[0], y1 - hm)
 
         for col_index, lead_name in enumerate(lead_names):
             x0, x1 = layout.column_bounds[col_index]
             wm = max(1, (x1 - x0) // 20)
-            x0, x1 = max(0, x0 + wm), min(mask.shape[1], x1 - wm)
+            x0_p = max(0, x0 + wm)
+            x1_p = min(cleaned.shape[1], x1 - wm)
 
-            region = cleaned[y0:y1, x0:x1]
+            region = cleaned[y0_p:y1_p, x0_p:x1_p]
             signals[canonical_lead_name(lead_name)] = extract_signal_from_region(
                 region, target_length=num_samples, pixels_per_mv=pixels_per_mv,
                 use_viterbi=True,
