@@ -376,15 +376,17 @@ def extract_signal_from_region(
     if use_viterbi and width > 20:
         trace = viterbi_trace(binary * 255)
     else:
-        # Fallback: per-column median.
+        # For UNet masks, calculate the robust center-of-mass (median y) per column
         trace = np.full(width, np.nan, dtype=np.float32)
         for x in range(width):
             ys = np.flatnonzero(binary[:, x])
-            if ys.size:
+            if ys.size > 0:
                 trace[x] = float(np.median(ys))
+        
         valid = np.flatnonzero(np.isfinite(trace))
         if valid.size == 0:
             return np.zeros(target_length, dtype=np.float32)
+        
         if valid.size < width:
             missing = np.flatnonzero(~np.isfinite(trace))
             trace[missing] = np.interp(missing, valid, trace[valid])
@@ -451,6 +453,7 @@ def digitize_mask(mask: np.ndarray, num_samples: int,
             region = cleaned[y0_p:y1_p, x0_p:x1_p]
             signals[canonical_lead_name(lead_name)] = extract_signal_from_region(
                 region, target_length=num_samples, pixels_per_mv=pixels_per_mv,
+                use_viterbi=False,
             )
 
     for lead_name in STANDARD_LEADS:
