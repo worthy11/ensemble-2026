@@ -14,8 +14,8 @@ from ecg_data import load_wfdb_signals
 from validate_signals import pearson_corr
 
 def main():
-    image_path = Path('../ecg_dataset/train/ecg_train_0005.png')
-    hea_path = Path('../ecg_dataset/train/ecg_train_0005.hea')
+    image_path = Path('../../tasks_data/task4/train/ecg_train_0005.png')
+    hea_path = Path('../../tasks_data/task4/train/ecg_train_0005.hea')
     checkpoint_path = Path('../artifacts/unet_resnet50.pt')
 
     if not image_path.exists():
