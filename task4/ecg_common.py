@@ -10,11 +10,11 @@ IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 STANDARD_LEADS = ["I", "II", "III", "AVR", "AVL", "AVF", "V1", "V2", "V3", "V4", "V5", "V6"]
 
 # Standard 12-lead ECG grid layout: 3 rows × 4 columns.
-# Each column represents a consecutive 2.5-second time window:
-#   col 0 → samples   0–1249
-#   col 1 → samples 1250–2499
-#   col 2 → samples 2500–3749
-#   col 3 → samples 3750–4999
+# In image coordinates, Y=0 is at the top.
+# The layout from top (Y=0) to bottom (Y=H) is:
+# Row 0: I, aVR, V1, V4
+# Row 1: II, aVL, V2, V5
+# Row 2: III, aVF, V3, V6
 GRID_LEAD_LAYOUT: list[list[str]] = [
     ["I",   "aVR", "V1", "V4"],
     ["II",  "aVL", "V2", "V5"],

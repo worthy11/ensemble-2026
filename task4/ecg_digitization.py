@@ -303,25 +303,40 @@ def moving_average(values: np.ndarray, window: int) -> np.ndarray:
     return np.convolve(values, k, mode="same")
 
 
+def _projection_centers(projection: np.ndarray, groups: int) -> list[int]:
+    smoothed = moving_average(projection.astype(np.float32), max(9, len(projection) // 80))
+    centers: list[int] = []
+    edges = np.linspace(0, len(smoothed), groups + 1, dtype=int)
+    for s, e in zip(edges[:-1], edges[1:]):
+        seg = smoothed[s:e]
+        centers.append(s + int(np.argmax(seg)) if seg.size else s)
+    return centers
+
+def _bounds_from_centers(centers: list[int], limit: int) -> list[tuple[int, int]]:
+    if len(centers) < 2:
+        return [(0, limit)]
+    b = [0]
+    for l, r in zip(centers[:-1], centers[1:]):
+        b.append((l + r) // 2)
+    b.append(limit)
+    return [(int(s), int(e)) for s, e in zip(b[:-1], b[1:])]
+
 def estimate_layout(mask: np.ndarray) -> Layout:
-    # Most robust approach: evenly divide the image into a 3x4 grid.
-    # The printed grids are physically standardized, so uniform division
-    # is much more reliable than trying to detect faint separators.
-    height, width = mask.shape
+    # 12-lead ECGs usually have 4 columns and 4 rows (3 standard rows + 1 rhythm strip at bottom).
+    # We must split the Y-axis into 4 rows to correctly isolate the top 3 rows.
+    binary = (mask > 127).astype(np.uint8)
+    x_proj = binary.sum(axis=0)
+    y_proj = binary.sum(axis=1)
     
     n_cols = len(GRID_LEAD_LAYOUT[0])  # 4
-    n_rows = len(GRID_LEAD_LAYOUT)     # 3
+    n_rows_actual = len(GRID_LEAD_LAYOUT) + 1  # 3 standard rows + 1 rhythm strip = 4 rows
     
-    col_bounds = []
-    x_edges = np.linspace(0, width, n_cols + 1, dtype=int)
-    for s, e in zip(x_edges[:-1], x_edges[1:]):
-        col_bounds.append((int(s), int(e)))
-        
-    row_bounds = []
-    y_edges = np.linspace(0, height, n_rows + 1, dtype=int)
-    for s, e in zip(y_edges[:-1], y_edges[1:]):
-        row_bounds.append((int(s), int(e)))
-        
+    col_bounds = _bounds_from_centers(_projection_centers(x_proj, n_cols), mask.shape[1])
+    row_bounds = _bounds_from_centers(_projection_centers(y_proj, n_rows_actual), mask.shape[0])
+    
+    # We only care about the first 3 rows for the 12 standard leads.
+    row_bounds = row_bounds[:len(GRID_LEAD_LAYOUT)]
+    
     return Layout(column_bounds=col_bounds, row_bounds=row_bounds)
 
 
