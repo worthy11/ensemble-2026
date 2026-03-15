@@ -49,8 +49,6 @@ class ECGSegmentationDataset(Dataset):
         image = load_rgb_image(image_path)
 
         if self.mask_dir is None:
-            # Rotate into portrait mode before scaling to preserve horizontal line thickness
-            image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
             transformed = self.transform(image=image)
             return {
                 "image": transformed["image"],
@@ -62,11 +60,6 @@ class ECGSegmentationDataset(Dataset):
             raise FileNotFoundError(f"Mask not found for {image_path.name}: {mask_path}")
 
         mask = load_mask(mask_path)
-        
-        # Rotate into portrait mode before scaling to preserve horizontal line thickness
-        image = cv2.rotate(image, cv2.ROTATE_90_CLOCKWISE)
-        mask = cv2.rotate(mask, cv2.ROTATE_90_CLOCKWISE)
-        
         transformed = self.transform(image=image, mask=mask)
         return {
             "image": transformed["image"],
@@ -76,11 +69,19 @@ class ECGSegmentationDataset(Dataset):
 
 
 def build_transforms(image_size: int, train: bool) -> A.Compose:
-    resize = [A.Resize(height=image_size, width=image_size)]
+    # By using RandomCrop instead of Resize, we train the UNet on high-fidelity patches
+    # of the full-resolution image. The 5px horizontal lines remain perfectly sharp and thick!
+    crop = A.RandomCrop(height=image_size, width=image_size, p=1.0) if train else A.CenterCrop(height=image_size, width=image_size, p=1.0)
+    
+    base = [
+        A.PadIfNeeded(min_height=image_size, min_width=image_size, border_mode=cv2.BORDER_CONSTANT, value=(255, 255, 255)),
+        crop
+    ]
+    
     normalize = [A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)), ToTensorV2()]
 
     if not train:
-        return A.Compose(resize + normalize)
+        return A.Compose(base + normalize)
 
     augmentations = [
         A.HorizontalFlip(p=0.5),
@@ -328,20 +329,30 @@ def predict_mask_array(
 ) -> np.ndarray:
     original_height, original_width = image_rgb.shape[:2]
     
-    # Rotate into portrait mode before inference to match training
-    image_rgb_rot = cv2.rotate(image_rgb, cv2.ROTATE_90_CLOCKWISE)
+    # UNets are fully convolutional, meaning a model trained on 512x512 crops
+    # can predict the entire 3300x2550 full-resolution image in a single forward pass!
+    # We just need to pad the image bounds to a multiple of 32 for the ResNet50 strides.
+    pad_h = (32 - (original_height % 32)) % 32
+    pad_w = (32 - (original_width % 32)) % 32
+    if pad_h > 0 or pad_w > 0:
+        image_rgb = cv2.copyMakeBorder(image_rgb, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+        
+    normalize = A.Compose([
+        A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ToTensorV2()
+    ])
+    tensor = normalize(image=image_rgb)["image"].unsqueeze(0).to(device)
     
-    transform = build_transforms(image_size=image_size, train=False)
-    tensor = transform(image=image_rgb_rot)["image"].unsqueeze(0).to(device)
-    logits = model(tensor)
-    probability_rot = torch.sigmoid(logits)[0, 0].cpu().numpy()
+    # Automatically cast to FP16 to massively save VRAM for the 8-Megapixel tensor
+    device_type = "cuda" if device.type == "cuda" else "cpu"
+    with torch.autocast(device_type=device_type):
+        logits = model(tensor)
+        
+    probability = torch.sigmoid(logits)[0, 0].cpu().numpy()
     
-    # Resize back to rotated original dimensions (which is W=original_height, H=original_width)
-    probability_rot = cv2.resize(probability_rot, (original_height, original_width), interpolation=cv2.INTER_LINEAR)
-    
-    # Rotate CCW 90 degrees back to original horizontal mode
-    # This precisely undoes the CW 90 degree rotation from training!
-    probability = cv2.rotate(probability_rot, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    # Crop the padding back out to perfectly match the layout bounding boxes
+    if pad_h > 0 or pad_w > 0:
+        probability = probability[:original_height, :original_width]
 
     return (probability >= threshold).astype(np.uint8) * 255
 
