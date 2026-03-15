@@ -65,6 +65,20 @@ def run_unet_pipeline_cmd(checkpoint: Path, image_size: int, threshold: float) -
     run_pipeline(pipeline_args)
 
 
+def run_adaptive_pipeline_cmd() -> None:
+    """Run adaptive Otsu + Viterbi pipeline (no trained model needed)."""
+    from ecg_digitization import run_adaptive_pipeline  # noqa: PLC0415
+
+    NPZ_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    pipeline_args = argparse.Namespace(
+        input_dir=TEST_DIR,
+        output=NPZ_FILE,
+        num_samples=NUM_SAMPLES,
+    )
+    run_adaptive_pipeline(pipeline_args)
+
+
 def submit() -> None:
     if not API_TOKEN:
         raise ValueError("TEAM_TOKEN not provided. Define TEAM_TOKEN in .env")
@@ -95,9 +109,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--mode",
-        choices=["classical", "unet"],
+        choices=["classical", "unet", "adaptive"],
         default="classical",
-        help="Pipeline to use: 'classical' (no ML) or 'unet' (trained model).",
+        help="Pipeline: 'classical' (HSV), 'unet' (trained model), 'adaptive' (Otsu+Viterbi, no model).",
     )
     parser.add_argument(
         "--checkpoint",
@@ -136,6 +150,8 @@ def main() -> None:
                 image_size=args.image_size or 512,
                 threshold=args.threshold or 0.5,
             )
+        elif args.mode == "adaptive":
+            run_adaptive_pipeline_cmd()
         else:
             run_classical_pipeline_cmd()
 
