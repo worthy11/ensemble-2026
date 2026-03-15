@@ -79,7 +79,7 @@ def run_adaptive_pipeline_cmd() -> None:
     run_adaptive_pipeline(pipeline_args)
 
 
-def submit() -> None:
+def submit(file_path: Path) -> None:
     if not API_TOKEN:
         raise ValueError("TEAM_TOKEN not provided. Define TEAM_TOKEN in .env")
     if not SERVER_URL:
@@ -87,7 +87,7 @@ def submit() -> None:
 
     headers = {"X-API-Token": API_TOKEN}
 
-    with open(NPZ_FILE, "rb") as f:
+    with open(file_path, "rb") as f:
         response = requests.post(
             f"{SERVER_URL}/{ENDPOINT}",
             files={"npz_file": f},
@@ -136,6 +136,12 @@ def main() -> None:
         action="store_true",
         help="Skip pipeline execution; submit the existing NPZ directly.",
     )
+    parser.add_argument(
+        "--file",
+        type=Path,
+        default=NPZ_FILE,
+        help="Path to the NPZ file to submit.",
+    )
     args = parser.parse_args()
 
     if not args.skip_pipeline:
@@ -155,7 +161,7 @@ def main() -> None:
         else:
             run_classical_pipeline_cmd()
 
-    submit()
+    submit(args.file)
 
 
 if __name__ == "__main__":
