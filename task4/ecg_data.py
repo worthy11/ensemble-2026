@@ -35,9 +35,7 @@ def render_trace_mask(metadata: dict, image_shape: tuple[int, int], thickness: i
             continue
 
         points = np.asarray(pixels, dtype=np.float32)
-        # plotted_pixels are [amplitude, time] but the image has
-        # time on the X axis and amplitude on the Y axis → swap columns.
-        points = points[:, ::-1].copy()
+        # JSON coordinates are [x, y], which perfectly match image [width, height]
         points[:, 0] = np.clip(points[:, 0], 0, width - 1)
         points[:, 1] = np.clip(points[:, 1], 0, height - 1)
         points = np.round(points).astype(np.int32)
