@@ -304,48 +304,23 @@ def moving_average(values: np.ndarray, window: int) -> np.ndarray:
 
 
 def estimate_layout(mask: np.ndarray) -> Layout:
-    # Based on the exact JSON ground truth bounding boxes across 3300x2550 images:
-    # X bounds for the 4 columns:
-    #   Col 0: ~177 - 915
-    #   Col 1: ~915 - 1653
-    #   Col 2: ~1653 - 2391
-    #   Col 3: ~2391 - 3129
-    # Y bounds for the 3 rows (ignoring the 4th rhythm strip at the bottom):
-    #   Row 0: ~937 - 1231
-    #   Row 1: ~1286 - 1636
-    #   Row 2: ~1819 - 2090
+    height, width = mask.shape
     
-    # Rather than hardcoding these exact pixels (which change if the image is scaled),
-    # we determine the true signal bounding box from the mask:
-    ys, xs = np.nonzero(mask > 127)
-    if len(ys) == 0:
-        return Layout(
-            column_bounds=[(0, mask.shape[1]//4)] * 4,
-            row_bounds=[(0, mask.shape[0]//3)] * 3
-        )
+    # Standardized 12-lead ECG relative bounding boxes mapped from 3300x2550 ground truth.
+    # X bounds (4 columns): Col0, Col1, Col2, Col3
+    x_edges = [0.053, 0.277, 0.501, 0.724, 0.949]
+    col_bounds = []
+    for s, e in zip(x_edges[:-1], x_edges[1:]):
+        col_bounds.append((int(s * width), int(e * width)))
         
-    x_min, x_max = int(xs.min()), int(xs.max())
-    y_min, y_max = int(ys.min()), int(ys.max())
-    
-    # The printed grid width is (x_max - x_min). 
-    # There are exactly 4 columns.
-    w = (x_max - x_min) // 4
-    col_bounds = [
-        (x_min, x_min + w),
-        (x_min + w, x_min + 2*w),
-        (x_min + 2*w, x_min + 3*w),
-        (x_min + 3*w, x_max)
-    ]
-    
-    # The Y-axis has 4 rows (3 standard + 1 rhythm).
-    h = (y_max - y_min) // 4
-    row_bounds = [
-        (y_min, y_min + h),
-        (y_min + h, y_min + 2*h),
-        (y_min + 2*h, y_min + 3*h)
-        # 4th row (rhythm) is omitted
-    ]
-    
+    # Y bounds (3 rows)
+    # The physical paper has 4 rows (last one is a continuous rhythm strip).
+    # We only care about the top 3 rows for standard leads.
+    y_edges = [0.360, 0.493, 0.658, 0.825]
+    row_bounds = []
+    for s, e in zip(y_edges[:-1], y_edges[1:]):
+        row_bounds.append((int(s * height), int(e * height)))
+        
     return Layout(column_bounds=col_bounds, row_bounds=row_bounds)
 
 
@@ -499,18 +474,11 @@ def digitize_image_adaptive(
 
     for row_index, lead_names in enumerate(GRID_LEAD_LAYOUT):
         y0, y1 = layout.row_bounds[row_index]
-        # Minimal padding
-        hm = max(1, (y1 - y0) // 20)
-        y0_p = max(0, y0 + hm)
-        y1_p = min(cleaned.shape[0], y1 - hm)
 
         for col_index, lead_name in enumerate(lead_names):
             x0, x1 = layout.column_bounds[col_index]
-            wm = max(1, (x1 - x0) // 20)
-            x0_p = max(0, x0 + wm)
-            x1_p = min(cleaned.shape[1], x1 - wm)
 
-            region = cleaned[y0_p:y1_p, x0_p:x1_p]
+            region = cleaned[y0:y1, x0:x1]
             signals[canonical_lead_name(lead_name)] = extract_signal_from_region(
                 region, target_length=num_samples, pixels_per_mv=pixels_per_mv,
                 use_viterbi=True,
