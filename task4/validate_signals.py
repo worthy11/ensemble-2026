@@ -90,8 +90,9 @@ def analyze_one_image(
             results[lead_name] = {"error": "missing"}
             continue
 
-        # Determine which slice of the GT corresponds to this lead panel.
-        # Find which column this lead is in.
+        # If it's a 3-channel rhythm strip at the bottom (V1, II, V5) it would be full 5000 samples,
+        # but our extraction pipeline currently only outputs 1250 samples for all leads.
+        # Find which column this lead is in the 3x4 grid to slice the matching GT.
         col_idx = None
         for row in GRID_LEAD_LAYOUT:
             for ci, ln in enumerate(row):
@@ -101,12 +102,17 @@ def analyze_one_image(
             if col_idx is not None:
                 break
 
-        if col_idx is not None:
+        if col_idx is not None and len(gt_full) >= 5000:
             start = col_idx * 1250
             end = start + 1250
             gt_slice = gt_full[start:end]
         else:
-            gt_slice = gt_full[:1250]
+            # Fallback for unmapped or short leads.
+            gt_slice = gt_full[:len(ext)]
+
+        if len(ext) == 0:
+            results[lead_name] = {"error": "extracted empty"}
+            continue
 
         # Resample extracted if lengths differ.
         if len(ext) != len(gt_slice):
