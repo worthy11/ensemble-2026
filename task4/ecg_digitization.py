@@ -32,20 +32,13 @@ class Layout:
 # ---------------------------------------------------------------------------
 
 def _has_grid_lines(binary: np.ndarray, min_line_length_ratio: float = 0.3) -> bool:
-    """Detect if the binary image still contains grid lines.
-
-    Grid lines are long horizontal/vertical structures that span a significant
-    fraction of the image width/height.
-    """
     h, w = binary.shape
-    # Check for horizontal lines
     horiz_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT, (max(20, int(w * min_line_length_ratio)), 1)
     )
     horiz = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horiz_kernel)
     if horiz.sum() > 0:
         return True
-    # Check for vertical lines
     vert_kernel = cv2.getStructuringElement(
         cv2.MORPH_RECT, (1, max(20, int(h * min_line_length_ratio)))
     )
@@ -59,21 +52,8 @@ def adaptive_otsu_threshold(
     hedge_step: float = 0.05,
     hedge_min: float = 0.6,
 ) -> np.ndarray:
-    """Adaptive thresholding: Otsu + iterative hedging factor to remove grid.
-
-    Steps:
-      1. Convert to grayscale, compute Otsu threshold.
-      2. Start with hedging_factor = 1.0.
-      3. Binarise with threshold = otsu_thresh × hedging_factor.
-      4. Reduce hedging_factor by 5% and repeat while grid lines are detected.
-      5. Stop when grid lines disappear or hedging_factor < 0.6.
-
-    Returns a uint8 binary mask (0/255) of the ECG signal.
-    """
     gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
-    # Invert: ECG traces are dark lines on light background.
     gray_inv = 255 - gray
-
     otsu_thresh, _ = cv2.threshold(gray_inv, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
     hedge = hedge_start
@@ -83,11 +63,9 @@ def adaptive_otsu_threshold(
         threshold = otsu_thresh * hedge
         _, binary = cv2.threshold(gray_inv, threshold, 255, cv2.THRESH_BINARY)
         binary = binary.astype(np.uint8)
-
         if not _has_grid_lines(binary):
             best_binary = binary
             break
-
         best_binary = binary
         hedge -= hedge_step
 
@@ -95,12 +73,71 @@ def adaptive_otsu_threshold(
         _, best_binary = cv2.threshold(gray_inv, otsu_thresh * hedge_min, 255, cv2.THRESH_BINARY)
         best_binary = best_binary.astype(np.uint8)
 
-    # Light denoising: remove small components.
     kernel = np.ones((3, 3), dtype=np.uint8)
     best_binary = cv2.morphologyEx(best_binary, cv2.MORPH_OPEN, kernel)
     best_binary = cv2.morphologyEx(best_binary, cv2.MORPH_CLOSE, kernel)
-
     return best_binary
+
+
+# ---------------------------------------------------------------------------
+# Grid-based amplitude calibration via FFT
+# ---------------------------------------------------------------------------
+
+def _detect_grid_spacing_fft(projection: np.ndarray) -> float | None:
+    """Detect grid spacing from a 1-D projection using FFT peak detection.
+
+    Returns the spacing in pixels, or None if detection fails.
+    """
+    proj = projection.astype(np.float64)
+    proj -= proj.mean()
+    if proj.std() < 1e-6:
+        return None
+
+    fft = np.abs(np.fft.rfft(proj))
+    fft[0] = 0  # remove DC
+    # Ignore very low frequencies (spacing > 1/3 of total length).
+    min_freq_idx = max(3, len(fft) // (len(proj) // 3 + 1))
+    # Ignore very high frequencies (spacing < 5 pixels).
+    max_freq_idx = min(len(fft) - 1, len(proj) // 5)
+
+    if min_freq_idx >= max_freq_idx:
+        return None
+
+    search_region = fft[min_freq_idx:max_freq_idx]
+    peak_idx = int(np.argmax(search_region)) + min_freq_idx
+
+    if peak_idx == 0:
+        return None
+
+    spacing = len(proj) / peak_idx
+    return spacing
+
+
+def estimate_pixels_per_mv(image_width: int, image_height: int,
+                           image_gray: np.ndarray | None = None) -> float:
+    """Estimate pixels/mV using FFT grid detection, with width-based fallback.
+
+    If a grayscale image is provided, tries to detect the actual grid spacing
+    using FFT on the vertical projection. Falls back to the geometric estimate.
+    """
+    if image_gray is not None:
+        # Vertical projection → detect horizontal grid spacing (amplitude axis).
+        v_proj = image_gray.mean(axis=1).astype(np.float64)
+        spacing = _detect_grid_spacing_fft(v_proj)
+        if spacing is not None and 5 < spacing < image_height / 3:
+            # Standard ECG: 1 small square = 1 mm, 1 mV = 10 mm = 10 squares.
+            pixels_per_mm = 1.0 / spacing  # Wait: spacing IS one grid square.
+            # Actually spacing = pixels per grid square (1mm).
+            pixels_per_mm = spacing  # pixels per 1mm grid square
+            pixels_per_mv = pixels_per_mm * ECG_GAIN_MM_PER_MV  # × 10
+            return pixels_per_mv
+
+    # Fallback: geometric estimate from image width.
+    seconds_per_column = LEAD_PANEL_SAMPLES / 500.0
+    mm_per_column = ECG_PAPER_SPEED_MM_PER_S * seconds_per_column
+    total_mm_width = mm_per_column * len(GRID_LEAD_LAYOUT[0])
+    pixels_per_mm = image_width / total_mm_width
+    return pixels_per_mm * ECG_GAIN_MM_PER_MV
 
 
 # ---------------------------------------------------------------------------
@@ -108,11 +145,9 @@ def adaptive_otsu_threshold(
 # ---------------------------------------------------------------------------
 
 def _find_segment_centers(column: np.ndarray) -> list[float]:
-    """Find centres of contiguous True-pixel runs in a binary column."""
     centers: list[float] = []
     in_segment = False
     start = 0
-
     for i, val in enumerate(column):
         if val > 0 and not in_segment:
             in_segment = True
@@ -120,10 +155,8 @@ def _find_segment_centers(column: np.ndarray) -> list[float]:
         elif val == 0 and in_segment:
             in_segment = False
             centers.append((start + i - 1) / 2.0)
-
     if in_segment:
         centers.append((start + len(column) - 1) / 2.0)
-
     return centers
 
 
@@ -135,23 +168,11 @@ def viterbi_trace(
     """Extract optimal signal path using Viterbi algorithm.
 
     For each column x, find centers of contiguous signal-pixel segments.
-    Build a graph where nodes = segment centers, edges connect adjacent columns.
-    Edge cost = alpha * euclidean_distance + (1-alpha) * |slope_change|.
-    Find the minimum-cost path through the entire image width.
-
-    Args:
-        binary_region: uint8 mask (0/255), height × width.
-        alpha: weight balancing distance vs. slope change (0.5 = equal).
-        max_jump: maximum pixel distance allowed between adjacent nodes.
-                  None = height/4 (reasonable default).
-
-    Returns:
-        float32 array of length = width, with the y-coordinate of the trace
-        for each column.  NaN-free (gaps are interpolated).
+    Edge cost = alpha * distance + (1-alpha) * |slope_change|.
     """
     height, width = binary_region.shape
     if max_jump is None:
-        max_jump = height / 4.0
+        max_jump = height / 3.0
 
     # Build nodes per column.
     all_nodes: list[list[float]] = []
@@ -159,42 +180,31 @@ def viterbi_trace(
         centers = _find_segment_centers(binary_region[:, x])
         all_nodes.append(centers)
 
-    # Fallback: if no nodes found, return flat baseline.
-    if all(len(nodes) == 0 for nodes in all_nodes):
+    if all(len(n) == 0 for n in all_nodes):
         return np.full(width, height / 2.0, dtype=np.float32)
 
-    # Forward pass: compute cheapest cost to reach each node.
+    # Forward pass.
     INF = 1e18
-    # cost[x] = list of costs for each node at column x
-    cost: list[list[float]] = []
-    backptr: list[list[int]] = []  # backpointer to previous node index
-    prev_slope: list[list[float]] = []  # slope arriving at each node
+    cost: list[list[float]] = [[] for _ in range(width)]
+    backptr: list[list[int]] = [[] for _ in range(width)]
+    prev_slope: list[list[float]] = [[] for _ in range(width)]
 
-    # Initialise first non-empty column.
+    # Find and initialise first non-empty column.
     first_x = -1
     for x in range(width):
         if all_nodes[x]:
-            cost.append([0.0] * len(all_nodes[x]))
-            backptr.append([-1] * len(all_nodes[x]))
-            prev_slope.append([0.0] * len(all_nodes[x]))
+            cost[x] = [0.0] * len(all_nodes[x])
+            backptr[x] = [-1] * len(all_nodes[x])
+            prev_slope[x] = [0.0] * len(all_nodes[x])
             first_x = x
             break
-        else:
-            cost.append([])
-            backptr.append([])
-            prev_slope.append([])
 
     if first_x == -1:
         return np.full(width, height / 2.0, dtype=np.float32)
 
-    # Process remaining columns.
     last_valid_x = first_x
     for x in range(first_x + 1, width):
-        nodes_x = all_nodes[x]
-        if not nodes_x:
-            cost.append([])
-            backptr.append([])
-            prev_slope.append([])
+        if not all_nodes[x]:
             continue
 
         nodes_prev = all_nodes[last_valid_x]
@@ -206,7 +216,7 @@ def viterbi_trace(
         bp_x: list[int] = []
         sl_x: list[float] = []
 
-        for j, yj in enumerate(nodes_x):
+        for yj in all_nodes[x]:
             best_cost = INF
             best_k = 0
             best_slope = 0.0
@@ -226,7 +236,6 @@ def viterbi_trace(
                     best_slope = new_slope
 
             if best_cost >= INF:
-                # No valid predecessor — start fresh from this node.
                 best_cost = 0.0
                 best_slope = 0.0
                 best_k = -1
@@ -235,47 +244,18 @@ def viterbi_trace(
             bp_x.append(best_k)
             sl_x.append(best_slope)
 
-        cost.append(c_x)
-        backptr.append(bp_x)
-        prev_slope.append(sl_x)
+        cost[x] = c_x
+        backptr[x] = bp_x
+        prev_slope[x] = sl_x
         last_valid_x = x
 
-    # Backward pass: trace the optimal path.
+    # Backward pass.
     trace = np.full(width, np.nan, dtype=np.float32)
-
-    # Find best terminal node.
-    best_end_cost = INF
-    best_end_idx = 0
-    for x in range(width - 1, -1, -1):
-        if cost[x]:
-            for j, c in enumerate(cost[x]):
-                if c < best_end_cost:
-                    best_end_cost = c
-                    best_end_idx = j
-            # Trace back from this column.
-            trace[x] = all_nodes[x][best_end_idx]
-            current_idx = best_end_idx
-
-            prev_x = x
-            for bx in range(x - 1, -1, -1):
-                if not backptr[bx + 1 if bx + 1 <= prev_x else prev_x]:
-                    continue
-                if bx + 1 <= prev_x and backptr[prev_x] and current_idx < len(backptr[prev_x]):
-                    parent = backptr[prev_x][current_idx]
-                    # Walk back to the actual previous valid column.
-                    # Find prev_x's predecessor.
-                    pass
-
-            break
-
-    # Simpler backward trace: walk from last valid column to first.
-    # Rebuild: find all valid columns in order.
     valid_cols = [x for x in range(width) if cost[x]]
 
     if not valid_cols:
         return np.full(width, height / 2.0, dtype=np.float32)
 
-    # Start from the last valid column.
     last = valid_cols[-1]
     best_idx = int(np.argmin(cost[last]))
     trace[last] = all_nodes[last][best_idx]
@@ -285,16 +265,14 @@ def viterbi_trace(
         x = valid_cols[i]
         px = valid_cols[i - 1]
         parent_idx = backptr[x][current_idx] if current_idx < len(backptr[x]) else -1
-        if parent_idx >= 0 and parent_idx < len(all_nodes[px]):
+        if 0 <= parent_idx < len(all_nodes[px]):
             trace[px] = all_nodes[px][parent_idx]
             current_idx = parent_idx
-        else:
-            # Broken chain — use median fallback for this column.
-            if all_nodes[px]:
-                current_idx = len(all_nodes[px]) // 2
-                trace[px] = all_nodes[px][current_idx]
+        elif all_nodes[px]:
+            current_idx = len(all_nodes[px]) // 2
+            trace[px] = all_nodes[px][current_idx]
 
-    # Interpolate any remaining NaN gaps.
+    # Interpolate NaN gaps.
     valid = np.flatnonzero(np.isfinite(trace))
     if valid.size == 0:
         return np.full(width, height / 2.0, dtype=np.float32)
@@ -306,87 +284,105 @@ def viterbi_trace(
 
 
 # ---------------------------------------------------------------------------
-# Amplitude calibration
-# ---------------------------------------------------------------------------
-
-def estimate_pixels_per_mv(mask_width: int) -> float:
-    """Estimate the pixel-to-millivolt scale from the image (mask) width.
-
-    Standard ECG layout:
-      - Paper speed = 25 mm/s  →  2.5 s × 25 mm/s = 62.5 mm per column
-      - 4 columns               →  250 mm total useful width
-      - Gain = 10 mm/mV         →  pixels_per_mv = (mask_width / 250) × 10
-    """
-    seconds_per_column = LEAD_PANEL_SAMPLES / 500  # 2.5 s
-    mm_per_column = ECG_PAPER_SPEED_MM_PER_S * seconds_per_column  # 62.5 mm
-    total_mm = mm_per_column * len(GRID_LEAD_LAYOUT[0])            # 250 mm (4 cols)
-    pixels_per_mm = mask_width / total_mm
-    return pixels_per_mm * ECG_GAIN_MM_PER_MV  # px/mV
-
-
-# ---------------------------------------------------------------------------
 # Mask cleaning & layout detection
 # ---------------------------------------------------------------------------
 
 def clean_mask(mask: np.ndarray, min_component_area: int = 64) -> np.ndarray:
     binary = (mask > 127).astype(np.uint8)
-    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    n_comp, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     cleaned = np.zeros_like(binary)
-    for component_id in range(1, component_count):
-        area = stats[component_id, cv2.CC_STAT_AREA]
-        if area >= min_component_area:
-            cleaned[labels == component_id] = 255
+    for cid in range(1, n_comp):
+        if stats[cid, cv2.CC_STAT_AREA] >= min_component_area:
+            cleaned[labels == cid] = 255
     kernel = np.ones((3, 3), dtype=np.uint8)
-    cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
-    return cleaned
+    return cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
 
 
 def moving_average(values: np.ndarray, window: int) -> np.ndarray:
     if window <= 1:
         return values
-    kernel = np.ones(window, dtype=np.float32) / float(window)
-    return np.convolve(values, kernel, mode="same")
+    k = np.ones(window, dtype=np.float32) / float(window)
+    return np.convolve(values, k, mode="same")
 
 
 def _projection_centers(projection: np.ndarray, groups: int) -> list[int]:
-    projection = projection.astype(np.float32)
-    smoothed = moving_average(projection, max(9, len(projection) // 80))
+    smoothed = moving_average(projection.astype(np.float32), max(9, len(projection) // 80))
     centers: list[int] = []
-    rough_edges = np.linspace(0, len(smoothed), groups + 1, dtype=int)
-    for start, end in zip(rough_edges[:-1], rough_edges[1:]):
-        segment = smoothed[start:end]
-        if segment.size == 0:
-            centers.append(start)
-            continue
-        centers.append(start + int(np.argmax(segment)))
+    edges = np.linspace(0, len(smoothed), groups + 1, dtype=int)
+    for s, e in zip(edges[:-1], edges[1:]):
+        seg = smoothed[s:e]
+        centers.append(s + int(np.argmax(seg)) if seg.size else s)
     return centers
 
 
 def _bounds_from_centers(centers: list[int], limit: int) -> list[tuple[int, int]]:
-    boundaries = [0]
-    for left, right in zip(centers[:-1], centers[1:]):
-        boundaries.append((left + right) // 2)
-    boundaries.append(limit)
-    return [(int(start), int(end)) for start, end in zip(boundaries[:-1], boundaries[1:])]
+    b = [0]
+    for l, r in zip(centers[:-1], centers[1:]):
+        b.append((l + r) // 2)
+    b.append(limit)
+    return [(int(s), int(e)) for s, e in zip(b[:-1], b[1:])]
 
 
 def estimate_layout(mask: np.ndarray) -> Layout:
     binary = (mask > 127).astype(np.uint8)
-    x_projection = binary.sum(axis=0)
-    y_projection = binary.sum(axis=1)
-    n_cols = len(GRID_LEAD_LAYOUT[0])   # 4
-    n_rows = len(GRID_LEAD_LAYOUT)      # 3
-    column_centers = _projection_centers(x_projection, groups=n_cols)
-    row_centers = _projection_centers(y_projection, groups=n_rows)
+    x_proj = binary.sum(axis=0)
+    y_proj = binary.sum(axis=1)
+    n_cols = len(GRID_LEAD_LAYOUT[0])  # 4
+    n_rows = len(GRID_LEAD_LAYOUT)     # 3
     return Layout(
-        column_bounds=_bounds_from_centers(column_centers, mask.shape[1]),
-        row_bounds=_bounds_from_centers(row_centers, mask.shape[0]),
+        column_bounds=_bounds_from_centers(_projection_centers(x_proj, n_cols), mask.shape[1]),
+        row_bounds=_bounds_from_centers(_projection_centers(y_proj, n_rows), mask.shape[0]),
     )
 
 
 # ---------------------------------------------------------------------------
-# Signal extraction with Viterbi + mV calibration
+# Signal extraction with Viterbi + baseline detection + mV calibration
 # ---------------------------------------------------------------------------
+
+def _detect_baseline_y(binary_region: np.ndarray) -> float:
+    """Detect the signal baseline as the median y of all signal pixels.
+
+    More accurate than assuming the vertical center of the region.
+    """
+    ys = np.flatnonzero(binary_region.sum(axis=1) > 0)
+    if ys.size == 0:
+        return binary_region.shape[0] / 2.0
+    # The baseline is the most "common" y — use median of per-column medians.
+    h, w = binary_region.shape
+    col_medians: list[float] = []
+    for x in range(w):
+        ys_col = np.flatnonzero(binary_region[:, x])
+        if ys_col.size:
+            col_medians.append(float(np.median(ys_col)))
+    if not col_medians:
+        return h / 2.0
+    return float(np.median(col_medians))
+
+
+def _trim_calibration_pulse(trace: np.ndarray, threshold_factor: float = 3.0) -> np.ndarray:
+    """Detect and replace the calibration pulse at the start of the trace.
+
+    The calibration pulse is a tall rectangular spike in the first ~10% of the signal.
+    Replace it with the baseline value to avoid corrupting the extracted signal.
+    """
+    n = len(trace)
+    search_end = max(10, n // 10)  # first 10% of signal
+
+    baseline = float(np.median(trace))
+    mad = float(np.median(np.abs(trace - baseline)))
+    if mad < 1e-6:
+        return trace
+
+    result = trace.copy()
+    pulse_thresh = threshold_factor * mad
+    for i in range(search_end):
+        if abs(result[i] - baseline) > pulse_thresh:
+            result[i] = baseline
+        else:
+            break  # stop at first non-pulse sample
+
+    return result
+
 
 def extract_signal_from_region(
     region_mask: np.ndarray,
@@ -396,17 +392,8 @@ def extract_signal_from_region(
 ) -> np.ndarray:
     """Extract a 1-D ECG signal from a binary mask region.
 
-    Uses Viterbi path tracing (if enabled) for a smooth, optimal path,
-    then converts pixel coordinates to millivolts using the calibration.
-
-    Args:
-        region_mask:  Mask for a single lead panel (uint8, 0/255).
-        target_length: Number of output samples.
-        pixels_per_mv: Calibration — how many pixel rows equal 1 mV.
-        use_viterbi: If True, use Viterbi path tracing (recommended).
-
-    Returns:
-        float32 array of length `target_length`, values in millivolts.
+    Uses Viterbi for optimal path, baseline detection for DC offset,
+    calibration pulse trimming, and pixel→mV conversion.
     """
     binary = (region_mask > 127).astype(np.uint8)
     height, width = binary.shape
@@ -414,114 +401,119 @@ def extract_signal_from_region(
     if binary.sum() == 0:
         return np.zeros(target_length, dtype=np.float32)
 
-    if use_viterbi:
+    # --- Path extraction ---
+    if use_viterbi and width > 20:
         trace = viterbi_trace(binary * 255)
     else:
-        # Fallback: per-column median (original method).
+        # Fallback: per-column median.
         trace = np.full(width, np.nan, dtype=np.float32)
         for x in range(width):
             ys = np.flatnonzero(binary[:, x])
             if ys.size:
                 trace[x] = float(np.median(ys))
-
         valid = np.flatnonzero(np.isfinite(trace))
         if valid.size == 0:
             return np.zeros(target_length, dtype=np.float32)
-        if valid.size == 1:
-            trace[:] = trace[valid[0]]
-        else:
+        if valid.size < width:
             missing = np.flatnonzero(~np.isfinite(trace))
             trace[missing] = np.interp(missing, valid, trace[valid])
 
-    # Light smoothing.
+    # --- Smoothing ---
     trace = moving_average(trace, max(3, trace.size // 200))
 
-    # Convert pixel y → millivolts.
-    baseline_px = height / 2.0
+    # --- Baseline detection (better than region center) ---
+    baseline_px = _detect_baseline_y(binary)
+
+    # --- Convert pixel y → millivolts (inverted y-axis) ---
     signal_mv = -(trace - baseline_px) / pixels_per_mv
 
-    # Resample to target_length.
+    # --- Trim calibration pulse ---
+    signal_mv = _trim_calibration_pulse(signal_mv)
+
+    # --- Resample to target_length ---
     src_x = np.linspace(0.0, 1.0, num=signal_mv.size, dtype=np.float32)
     tgt_x = np.linspace(0.0, 1.0, num=target_length, dtype=np.float32)
     return np.interp(tgt_x, src_x, signal_mv).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------
-# Top-level digitisation functions
+# Top-level digitisation
 # ---------------------------------------------------------------------------
 
-def digitize_mask(mask: np.ndarray, num_samples: int) -> dict[str, np.ndarray]:
+def _get_gray_for_calibration(image_source: np.ndarray | None) -> np.ndarray | None:
+    """Convert image to grayscale if available, for FFT grid detection."""
+    if image_source is None:
+        return None
+    if len(image_source.shape) == 2:
+        return image_source
+    return cv2.cvtColor(image_source, cv2.COLOR_RGB2GRAY)
+
+
+def digitize_mask(mask: np.ndarray, num_samples: int,
+                  image_rgb: np.ndarray | None = None) -> dict[str, np.ndarray]:
     """Convert a predicted segmentation mask to a dict of lead → signal (mV)."""
     cleaned = clean_mask(mask)
     layout = estimate_layout(cleaned)
-    pixels_per_mv = estimate_pixels_per_mv(mask.shape[1])
+
+    gray = _get_gray_for_calibration(image_rgb)
+    pixels_per_mv = estimate_pixels_per_mv(mask.shape[1], mask.shape[0], gray)
 
     signals: dict[str, np.ndarray] = {}
 
     for row_index, lead_names in enumerate(GRID_LEAD_LAYOUT):
         y0, y1 = layout.row_bounds[row_index]
-        height_margin = max(4, (y1 - y0) // 12)
-        y0 = min(y1, y0 + height_margin)
-        y1 = max(y0 + 1, y1 - height_margin)
+        hm = max(4, (y1 - y0) // 12)
+        y0, y1 = min(y1, y0 + hm), max(y0 + 1, y1 - hm)
 
-        for column_index, lead_name in enumerate(lead_names):
-            x0, x1 = layout.column_bounds[column_index]
-            width_margin = max(4, (x1 - x0) // 12)
-            x0 = min(x1, x0 + width_margin)
-            x1 = max(x0 + 1, x1 - width_margin)
+        for col_index, lead_name in enumerate(lead_names):
+            x0, x1 = layout.column_bounds[col_index]
+            wm = max(4, (x1 - x0) // 12)
+            x0, x1 = min(x1, x0 + wm), max(x0 + 1, x1 - wm)
 
             region = cleaned[y0:y1, x0:x1]
             signals[canonical_lead_name(lead_name)] = extract_signal_from_region(
-                region,
-                target_length=num_samples,
-                pixels_per_mv=pixels_per_mv,
+                region, target_length=num_samples, pixels_per_mv=pixels_per_mv,
             )
 
     for lead_name in STANDARD_LEADS:
         signals.setdefault(lead_name, np.zeros(num_samples, dtype=np.float32))
 
-    return {lead_name: signals[lead_name] for lead_name in STANDARD_LEADS}
+    return {ln: signals[ln] for ln in STANDARD_LEADS}
 
 
 def digitize_image_adaptive(
-    image_rgb: np.ndarray,
-    num_samples: int,
+    image_rgb: np.ndarray, num_samples: int,
 ) -> dict[str, np.ndarray]:
-    """Full adaptive pipeline: Otsu threshold → clean → layout → Viterbi → mV.
-
-    This does NOT need a trained model — it uses classical CV only.
-    """
+    """Full adaptive pipeline: Otsu threshold → Viterbi → mV. No model needed."""
     binary = adaptive_otsu_threshold(image_rgb)
     cleaned = clean_mask(binary, min_component_area=max(10, binary.size // 80000))
     layout = estimate_layout(cleaned)
-    pixels_per_mv = estimate_pixels_per_mv(image_rgb.shape[1])
+
+    gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+    pixels_per_mv = estimate_pixels_per_mv(image_rgb.shape[1], image_rgb.shape[0], gray)
 
     signals: dict[str, np.ndarray] = {}
 
     for row_index, lead_names in enumerate(GRID_LEAD_LAYOUT):
         y0, y1 = layout.row_bounds[row_index]
-        height_margin = max(4, (y1 - y0) // 12)
-        y0 = min(y1, y0 + height_margin)
-        y1 = max(y0 + 1, y1 - height_margin)
+        hm = max(4, (y1 - y0) // 12)
+        y0, y1 = min(y1, y0 + hm), max(y0 + 1, y1 - hm)
 
-        for column_index, lead_name in enumerate(lead_names):
-            x0, x1 = layout.column_bounds[column_index]
-            width_margin = max(4, (x1 - x0) // 12)
-            x0 = min(x1, x0 + width_margin)
-            x1 = max(x0 + 1, x1 - width_margin)
+        for col_index, lead_name in enumerate(lead_names):
+            x0, x1 = layout.column_bounds[col_index]
+            wm = max(4, (x1 - x0) // 12)
+            x0, x1 = min(x1, x0 + wm), max(x0 + 1, x1 - wm)
 
             region = cleaned[y0:y1, x0:x1]
             signals[canonical_lead_name(lead_name)] = extract_signal_from_region(
-                region,
-                target_length=num_samples,
-                pixels_per_mv=pixels_per_mv,
+                region, target_length=num_samples, pixels_per_mv=pixels_per_mv,
                 use_viterbi=True,
             )
 
     for lead_name in STANDARD_LEADS:
         signals.setdefault(lead_name, np.zeros(num_samples, dtype=np.float32))
 
-    return {lead_name: signals[lead_name] for lead_name in STANDARD_LEADS}
+    return {ln: signals[ln] for ln in STANDARD_LEADS}
 
 
 def digitize_mask_file(mask_path: Path, num_samples: int) -> dict[str, np.ndarray]:
@@ -543,44 +535,46 @@ def save_submission(records: dict[str, dict[str, np.ndarray]], output_path: Path
 def digitize_masks(args) -> None:
     records: dict[str, dict[str, np.ndarray]] = {}
     mask_paths = sorted(
-        path for path in args.mask_dir.iterdir()
-        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+        p for p in args.mask_dir.iterdir()
+        if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
     )
     if not mask_paths:
         raise FileNotFoundError(f"No mask images found in {args.mask_dir}")
-
     for mask_path in tqdm(mask_paths, desc="digitize-masks"):
         records[record_name_from_path(mask_path)] = digitize_mask_file(
             mask_path, num_samples=args.num_samples
         )
-
     save_submission(records, args.output)
     print(f"saved digitized signals to {args.output}")
 
 
 def run_pipeline(args) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model, checkpoint_image_size, checkpoint_threshold = load_checkpoint(args.checkpoint, device)
-    image_size = args.image_size or checkpoint_image_size
-    threshold = args.threshold if args.threshold is not None else checkpoint_threshold
+    model, ckpt_img_size, ckpt_threshold = load_checkpoint(args.checkpoint, device)
+    image_size = args.image_size or ckpt_img_size
+    threshold = args.threshold if args.threshold is not None else ckpt_threshold
 
     records: dict[str, dict[str, np.ndarray]] = {}
     if args.mask_output_dir is not None:
         args.mask_output_dir.mkdir(parents=True, exist_ok=True)
 
     image_paths = sorted(
-        path for path in args.input_dir.iterdir()
-        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+        p for p in args.input_dir.iterdir()
+        if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
     )
     if not image_paths:
         raise FileNotFoundError(f"No images found in {args.input_dir}")
 
     for image_path in tqdm(image_paths, desc="pipeline"):
         image_rgb = load_rgb_image(image_path)
-        mask = predict_mask_array(model, image_rgb, image_size=image_size, threshold=threshold, device=device)
+        mask = predict_mask_array(model, image_rgb, image_size=image_size,
+                                  threshold=threshold, device=device)
         if args.mask_output_dir is not None:
             cv2.imwrite(str(args.mask_output_dir / image_path.name), mask)
-        records[record_name_from_path(image_path)] = digitize_mask(mask, num_samples=args.num_samples)
+        # Pass image_rgb for FFT-based amplitude calibration.
+        records[record_name_from_path(image_path)] = digitize_mask(
+            mask, num_samples=args.num_samples, image_rgb=image_rgb,
+        )
 
     save_submission(records, args.output)
     print(f"saved submission archive to {args.output}")
@@ -589,10 +583,9 @@ def run_pipeline(args) -> None:
 def run_adaptive_pipeline(args) -> None:
     """Run full adaptive Otsu + Viterbi pipeline (no trained model needed)."""
     records: dict[str, dict[str, np.ndarray]] = {}
-
     image_paths = sorted(
-        path for path in args.input_dir.iterdir()
-        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+        p for p in args.input_dir.iterdir()
+        if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
     )
     if not image_paths:
         raise FileNotFoundError(f"No images found in {args.input_dir}")

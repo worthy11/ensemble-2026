@@ -101,7 +101,7 @@ def run_classical_pipeline(args) -> None:
         mask = build_classical_trace_mask(image_rgb)
         if args.mask_output_dir is not None:
             cv2.imwrite(str(args.mask_output_dir / image_path.name), mask)
-        records[record_name_from_path(image_path)] = digitize_mask(mask, num_samples=args.num_samples)
+        records[record_name_from_path(image_path)] = digitize_mask(mask, num_samples=args.num_samples, image_rgb=image_rgb)
 
     save_submission(records, args.output)
     print(f"saved submission archive to {args.output}")

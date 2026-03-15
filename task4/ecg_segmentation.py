@@ -14,6 +14,7 @@ from albumentations.pytorch import ToTensorV2
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch import nn
 from torch.optim import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -91,9 +92,9 @@ def build_transforms(image_size: int, train: bool) -> A.Compose:
     return A.Compose(resize + augmentations + normalize)
 
 
-def build_model() -> nn.Module:
+def build_model(encoder_name: str = "resnet50") -> nn.Module:
     return smp.Unet(
-        encoder_name="resnet34",
+        encoder_name=encoder_name,
         encoder_weights="imagenet",
         in_channels=3,
         classes=1,
@@ -129,13 +130,15 @@ def batch_iou(logits: torch.Tensor, targets: torch.Tensor, threshold: float) -> 
 
 
 class ECGSegmentationLightningModule(pl.LightningModule):
-    def __init__(self, lr: float, threshold: float, image_size: int) -> None:
+    def __init__(self, lr: float, threshold: float, image_size: int,
+                 encoder_name: str = "resnet50", epochs: int = 25) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.model = build_model()
+        self.model = build_model(encoder_name=encoder_name)
         self.lr = lr
         self.threshold = threshold
         self.image_size = image_size
+        self.total_epochs = epochs
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         return self.model(images)
@@ -158,7 +161,9 @@ class ECGSegmentationLightningModule(pl.LightningModule):
         return self._shared_step(batch, stage="val")
 
     def configure_optimizers(self):
-        return Adam(self.parameters(), lr=self.lr)
+        optimizer = Adam(self.parameters(), lr=self.lr)
+        scheduler = CosineAnnealingLR(optimizer, T_max=self.total_epochs, eta_min=1e-6)
+        return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"}}
 
 
 def _extract_model_state_dict(checkpoint: dict) -> dict[str, torch.Tensor]:
@@ -227,10 +232,13 @@ def train_model(args) -> None:
         prefetch_factor=2 if num_workers > 0 else None,
     )
 
+    encoder_name = getattr(args, 'encoder_name', 'resnet50')
     lightning_module = ECGSegmentationLightningModule(
         lr=args.lr,
         threshold=args.threshold,
         image_size=args.image_size,
+        encoder_name=encoder_name,
+        epochs=args.epochs,
     )
 
     checkpoint_callback = ModelCheckpoint(
@@ -286,8 +294,16 @@ def load_checkpoint(checkpoint_path: Path, device: torch.device) -> tuple[nn.Mod
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model_state = _extract_model_state_dict(checkpoint)
 
-    model = build_model().to(device)
-    model.load_state_dict(model_state)
+    # Try resnet50 first, fall back to resnet34 for older checkpoints.
+    for enc in ("resnet50", "resnet34"):
+        try:
+            model = build_model(encoder_name=enc).to(device)
+            model.load_state_dict(model_state)
+            break
+        except RuntimeError:
+            continue
+    else:
+        raise RuntimeError("Could not load checkpoint with resnet50 or resnet34 encoder.")
     model.eval()
 
     image_size = int(_read_checkpoint_hparam(checkpoint, "image_size", 512))
